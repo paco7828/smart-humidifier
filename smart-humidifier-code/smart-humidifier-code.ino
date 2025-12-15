@@ -1,4 +1,7 @@
-#include <BluetoothSerial.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
@@ -25,8 +28,21 @@ DHT dht(DHT_PIN, DHT_TYPE);
 // Display
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
-// Bluetooth Serial
-BluetoothSerial SerialBT;
+// BLE
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+BLECharacteristic *pCharacteristic = NULL;
+String receivedCommand = "";
+
+class SmartHumidifierCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    String value = pCharacteristic->getValue().c_str();
+    if (value.length() > 0) {
+      receivedCommand = value;
+      receivedCommand.trim();
+    }
+  }
+};
 
 // Operating modes
 enum Mode {
@@ -55,15 +71,27 @@ unsigned long lastDisplayUpdate = 0;
 float currentTemp = 0;
 float currentHumidity = 0;
 unsigned long lastSensorRead = 0;
-constexpr SENSOR_READ_INTERVAL = 2000;     // 2 seconds
-constexpr DISPLAY_UPDATE_INTERVAL = 2000;  // 2 seconds
+constexpr unsigned long SENSOR_READ_INTERVAL = 2000;     // 2 seconds
+constexpr unsigned long DISPLAY_UPDATE_INTERVAL = 2000;  // 2 seconds
 
 // RGB
 uint8_t rgbR = 0, rgbG = 0, rgbB = 0;
 
 void setup() {
   Serial.begin(115200);
-  SerialBT.begin("Smart-Humidifier");
+
+  // BLE Setup
+  BLEDevice::init("Smart-Humidifier");
+  BLEServer *pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  pCharacteristic->setCallbacks(new SmartHumidifierCallbacks());
+  pService->start();
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->start();
 
   // Temperature & humidity
   dht.begin();
@@ -82,11 +110,10 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Bluetooth
-  if (SerialBT.available()) {
-    String cmd = SerialBT.readStringUntil('\n');
-    cmd.trim();
-    processCommand(cmd);
+  // BLE Command
+  if (receivedCommand.length() > 0) {
+    processCommand(receivedCommand);
+    receivedCommand = "";
   }
 
   // Temperature & humidity
@@ -196,6 +223,14 @@ void updateDisplay() {
     tft.fillCircle(150, 120, 3, ST77XX_YELLOW);
 }
 
+void sendBLE(String msg) {
+  if (pCharacteristic) {
+    pCharacteristic->setValue(msg.c_str());
+    pCharacteristic->notify();
+  }
+  Serial.println(msg);
+}
+
 void processCommand(String cmd) {
   String resp = "";
 
@@ -262,6 +297,6 @@ void processCommand(String cmd) {
     resp = "Unknown command";
   }
 
-  SerialBT.println(resp);
+  sendBLE(resp);
   Serial.println(cmd + " -> " + resp);
 }
