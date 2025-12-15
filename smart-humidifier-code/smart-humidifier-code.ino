@@ -4,6 +4,13 @@
 #include <SPI.h>
 #include <DHT.h>
 
+/*
+RGB Led functionality:
+  -When humidifying needed in timed mode => pulsing red | else => pulsing green
+  -When bluetooth client is present => pulsing blue
+  -When known bluetooth command received => double green "beep" | else => double red "beep"
+*/
+
 // Pins
 constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
