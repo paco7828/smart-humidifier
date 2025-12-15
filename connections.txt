@@ -1,0 +1,38 @@
+DC-DC step up module:
+    VIN+ -> Power switch Leg 1
+    VIN -> Battery -
+    VOUT+ -> MCU 5V
+    VOUT- -> MCU GND
+
+1S Battery charger module:
+    B+ -> Battery +
+    B- -> Battery -
+
+MCU:
+    5V -> DC-DC step up module VOUT+
+    GND -> DC-DC step up module VOUT-
+    GPIO? -> Humidifier module Signal
+
+Power switch:
+    Leg 1 -> DC-DC step up module VIN+
+    Leg 2 -> Battery +
+
+Temperature + Humidity sensor (DHT11):
+    -VCC -> MCU 3.3V (10kR resistor Leg 1)
+    -GND -> MCU GND
+    -DATA -> MCU GPIO? (10kR resistor Leg 2)
+
+1.8" TFT Display:
+    -LED -> MCU GPIO?
+    -SCK -> MCU GPIO?
+    -SDA -> MCU GPIO?
+    -A0 -> MCU GPIO?
+    -RESET -> MCU GPIO?
+    -CS -> MCU GPIO?
+    -GND -> MCU GND
+    -VCC -> MCU 5V
+
+Humidifier module:
+    5V -> DC-DC step up module VOUT+
+    GND -> DC-DC step up module VOUT-
+    Signal -> MCU GPIO?
