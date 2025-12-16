@@ -6,6 +6,7 @@
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
 #include <DHT.h>
+#include <ezButton.h>
 
 /*
 RGB Led functionality:
@@ -18,9 +19,9 @@ RGB Led functionality:
 constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
 constexpr uint8_t TFT_DC = 3;
-constexpr uint8_t TFT_LED = 0;
 constexpr uint8_t DHT_PIN = 1;
 constexpr uint8_t HUMID_PIN = 5;
+constexpr uint8_t BUTTON_PIN = 0;
 
 // Temperature & humidity
 #define DHT_TYPE DHT22
@@ -34,6 +35,19 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 BLECharacteristic *pCharacteristic = NULL;
 String receivedCommand = "";
+
+// BLE Advertising
+bool isAdvertising = false;
+unsigned long advertisingStartTime = 0;
+constexpr unsigned long ADVERTISING_DURATION = 180000;  // 3 minutes
+bool firstBoot = true;
+
+// BLE Server & Advertising pointers
+BLEServer *pServer = NULL;
+BLEAdvertising *pAdvertising = NULL;
+
+// Button
+ezButton button(BUTTON_PIN);
 
 class SmartHumidifierCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
@@ -88,18 +102,22 @@ uint8_t rgbR = 0, rgbG = 0, rgbB = 0;
 void setup() {
   Serial.begin(115200);
 
+  // Button setup
+  button.setDebounceTime(50);
+
   // BLE Setup
   BLEDevice::init("Smart-Humidifier");
-  BLEServer *pServer = BLEDevice::createServer();
+  pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
   pCharacteristic->setCallbacks(new SmartHumidifierCallbacks());
   pService->start();
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->start();
+
+  startBLEAdvertising();
 
   dht.begin();
 
@@ -113,8 +131,6 @@ void setup() {
   digitalWrite(HUMID_PIN, LOW);
 
   // Display
-  pinMode(TFT_LED, OUTPUT);
-  digitalWrite(TFT_LED, HIGH);
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
@@ -128,6 +144,19 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  // Button handling
+  button.loop();
+
+  // BLE Advertising timeout check
+  if (isAdvertising && (now - advertisingStartTime >= ADVERTISING_DURATION)) {
+    stopBLEAdvertising();
+  }
+
+  // Button press detection
+  if (button.isPressed()) {
+    startBLEAdvertising();
+  }
 
   // BLE Command
   if (receivedCommand.length() > 0) {
@@ -153,6 +182,28 @@ void loop() {
   if (displayOn && (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL)) {
     lastDisplayUpdate = now;
     updateDisplay();
+  }
+}
+
+void startBLEAdvertising() {
+  if (!isAdvertising) {
+    pAdvertising->start();
+    isAdvertising = true;
+    advertisingStartTime = millis();
+
+    if (firstBoot) {
+      firstBoot = false;
+    }
+
+    Serial.println("BLE Advertising started");
+  }
+}
+
+void stopBLEAdvertising() {
+  if (isAdvertising) {
+    pAdvertising->stop();
+    isAdvertising = false;
+    Serial.println("BLE Advertising stopped");
   }
 }
 
@@ -289,6 +340,27 @@ void updateDisplay() {
     tft.print(currentMode == AUTONOMOUS ? "AUTO" : "TIMED");
     prevMode = currentMode;
   }
+
+  // Draw BLE icon if advertising
+  drawBLEIcon();
+}
+
+void drawBLEIcon() {
+  int x = 130;
+  int y = 110;
+  tft.fillRect(x, y, 20, 16, ST77XX_BLACK);
+
+  if (isAdvertising) {
+    drawBluetoothIcon(x, y, ST77XX_BLUE);
+  }
+}
+
+void drawBluetoothIcon(int x, int y, uint16_t color) {
+  tft.drawLine(x + 4, y, x + 4, y + 12, color);
+  tft.drawLine(x + 4, y + 6, x + 10, y, color);
+  tft.drawLine(x + 4, y + 6, x + 10, y + 12, color);
+  tft.drawLine(x + 10, y, x + 16, y + 6, color);
+  tft.drawLine(x + 10, y + 12, x + 16, y + 6, color);
 }
 
 void sendBLE(String msg) {
@@ -324,12 +396,10 @@ void processCommand(String cmd) {
     }
   } else if (cmd == "DON") {
     displayOn = true;
-    digitalWrite(TFT_LED, HIGH);
     resp = "Display on";
     initDisplay();
   } else if (cmd == "DOFF") {
     displayOn = false;
-    digitalWrite(TFT_LED, LOW);
     displayInitialized = false;
     resp = "Display off";
   } else if (cmd == "AUTO") {
@@ -363,6 +433,12 @@ void processCommand(String cmd) {
       timedDuration = val;
       resp = "Duration OK";
     }
+  } else if (cmd == "BLEON") {
+    startBLEAdvertising();
+    resp = "BLE Advertising started";
+  } else if (cmd == "BLEOFF") {
+    stopBLEAdvertising();
+    resp = "BLE Advertising stopped";
   } else {
     resp = "Unknown command";
   }
@@ -370,7 +446,6 @@ void processCommand(String cmd) {
   sendBLE(resp);
   Serial.println(cmd + " -> " + resp);
 }
-
 
 void drawTemperatureIcon(int x, int y, uint16_t color) {
   tft.fillCircle(x, y + 18, 7, color);   // Bulb
