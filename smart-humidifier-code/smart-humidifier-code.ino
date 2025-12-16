@@ -103,6 +103,7 @@ void setup() {
 
   // Display
   pinMode(TFT_LED, OUTPUT);
+  digitalWrite(TFT_LED, HIGH);
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
   tft.fillScreen(ST77XX_BLACK);
