@@ -18,6 +18,7 @@ RGB Led functionality:
 constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
 constexpr uint8_t TFT_DC = 3;
+constexpr uint8_t TFT_LED = 0;
 constexpr uint8_t DHT_PIN = 10;
 constexpr uint8_t HUMID_PIN = 8;
 
@@ -101,6 +102,7 @@ void setup() {
   digitalWrite(HUMID_PIN, LOW);
 
   // Display
+  pinMode(TFT_LED, OUTPUT);
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
   tft.fillScreen(ST77XX_BLACK);
@@ -256,11 +258,12 @@ void processCommand(String cmd) {
     }
   } else if (cmd == "DON") {
     displayOn = true;
+    digitalWrite(TFT_LED, HIGH);
     resp = "Display on";
     updateDisplay();
   } else if (cmd == "DOFF") {
     displayOn = false;
-    tft.fillScreen(ST77XX_BLACK);
+    digitalWrite(TFT_LED, LOW);
     resp = "Display off";
   } else if (cmd == "AUTO") {
     currentMode = AUTONOMOUS;
