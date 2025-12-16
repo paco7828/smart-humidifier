@@ -19,11 +19,11 @@ constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
 constexpr uint8_t TFT_DC = 3;
 constexpr uint8_t TFT_LED = 0;
-constexpr uint8_t DHT_PIN = 10;
-constexpr uint8_t HUMID_PIN = 8;
+constexpr uint8_t DHT_PIN = 1;
+constexpr uint8_t HUMID_PIN = 5;
 
 // Temperature & humidity
-#define DHT_TYPE DHT11
+#define DHT_TYPE DHT22
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // Display
