@@ -105,8 +105,10 @@ void setup() {
   pinMode(TFT_LED, OUTPUT);
   digitalWrite(TFT_LED, HIGH);
   tft.initR(INITR_BLACKTAB);
-  tft.setRotation(1);
+  tft.setRotation(3);
   tft.fillScreen(ST77XX_BLACK);
+
+  showSplashScreen();
   updateDisplay();
 }
 
@@ -188,42 +190,54 @@ void stopHumidifier() {
 
 void updateDisplay() {
   tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 10);
-  tft.setTextSize(1);
+
+  int yPos = 5;
+  int iconX = 25;
+  int textX = 60;
+
+  // Temperature icon & value
+  drawTemperatureIcon(iconX, yPos, ST77XX_YELLOW);
+  tft.setCursor(textX, yPos);
+  tft.setTextSize(2);
   tft.setTextColor(ST77XX_CYAN);
-
-  tft.print("Temp: ");
   tft.print(currentTemp, 1);
-  tft.println(" C");
-  tft.print("Humidity: ");
+  tft.write(247);
+  tft.print("C");
+
+  yPos += 32;
+
+  // Humidity icon & value
+  drawWaterDropIcon(iconX, yPos, ST77XX_BLUE);
+  tft.setCursor(textX, yPos);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_CYAN);
   tft.print(currentHumidity, 1);
-  tft.println(" %");
-  tft.print("Threshold: ");
-  tft.print(humidityThreshold, 1);
-  tft.println(" %");
+  tft.print("%");
 
-  tft.print("Mode: ");
-  if (currentMode == AUTONOMOUS) {
-    tft.println("AUTO");
-  } else {
-    tft.println("TIMED");
-    tft.print("Interval: ");
-    tft.print(timedInterval);
-    tft.println("s");
-    tft.print("For: ");
-    tft.print(timedDuration);
-    tft.println("s");
-  }
+  yPos += 40;
 
-  tft.println();
-  tft.setTextColor(isHumidifying ? ST77XX_GREEN : ST77XX_RED);
-  tft.print("Status: ");
-  tft.println(isHumidifying ? "ON" : "OFF");
+  // Target icon
+  drawTargetIcon(iconX, yPos, ST77XX_ORANGE);
 
-  static bool anim = false;
-  anim = !anim;
-  if (anim)
-    tft.fillCircle(150, 120, 3, ST77XX_YELLOW);
+  // Target value
+  tft.setCursor(textX, yPos);
+  tft.setTextSize(2);
+  tft.setCursor(textX, yPos - 8);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.print(humidityThreshold, 0);
+  tft.print("%");
+
+  yPos += 32;
+
+  // Mode icon
+  drawModeIcon(iconX, yPos, ST77XX_MAGENTA);
+
+  // Mode value
+  tft.setCursor(textX, yPos);
+  tft.setTextSize(2);
+  tft.setCursor(textX, yPos - 8);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.print(currentMode == AUTONOMOUS ? "AUTO" : "TIMED");
 }
 
 void sendBLE(String msg) {
@@ -269,10 +283,12 @@ void processCommand(String cmd) {
   } else if (cmd == "AUTO") {
     currentMode = AUTONOMOUS;
     resp = "Autonomous mode";
+    updateDisplay();
   } else if (cmd == "TIMED") {
     currentMode = TIMED;
     lastTimedStart = millis();
     resp = "Timed mode\nInterval:" + String(timedInterval) + "\nFor:" + String(timedDuration) + "\n";
+    updateDisplay();
   } else if (cmd.startsWith("INTRVL")) {
     int val = cmd.substring(6).toInt();
     if (val < 300)
@@ -285,6 +301,7 @@ void processCommand(String cmd) {
       timedInterval = val;
       resp = "Interval OK";
     }
+    updateDisplay();
   } else if (cmd.startsWith("FOR")) {
     int val = cmd.substring(3).toInt();
     if (val < 300)
@@ -297,10 +314,74 @@ void processCommand(String cmd) {
       timedDuration = val;
       resp = "Duration OK";
     }
+    updateDisplay();
   } else {
     resp = "Unknown command";
   }
 
   sendBLE(resp);
   Serial.println(cmd + " -> " + resp);
+}
+
+
+void drawTemperatureIcon(int x, int y, uint16_t color) {
+  tft.fillCircle(x, y + 18, 7, color);   // Bulb
+  tft.fillRect(x - 3, y, 6, 18, color);  // Tube
+  // Mercury
+  tft.fillRect(x - 1, y + 4, 2, 14, ST77XX_RED);
+  tft.fillCircle(x, y + 18, 4, ST77XX_RED);
+}
+
+void drawWaterDropIcon(int x, int y, uint16_t color) {
+  tft.fillCircle(x, y + 15, 6, color);
+  tft.fillTriangle(x, y, x - 6, y + 15, x + 6, y + 15, color);
+}
+
+void drawModeIcon(int x, int y, uint16_t color) {
+  tft.drawCircle(x, y, 7, color);
+  tft.fillCircle(x, y, 2, color);
+  tft.drawLine(x - 10, y, x - 7, y, color);
+  tft.drawLine(x + 7, y, x + 10, y, color);
+  tft.drawLine(x, y - 10, x, y - 7, color);
+  tft.drawLine(x, y + 7, x, y + 10, color);
+  tft.drawLine(x - 7, y - 7, x - 10, y - 10, color);
+  tft.drawLine(x + 7, y + 7, x + 10, y + 10, color);
+  tft.drawLine(x + 7, y - 7, x + 10, y - 10, color);
+  tft.drawLine(x - 7, y + 7, x - 10, y + 10, color);
+}
+
+void drawTargetIcon(int x, int y, uint16_t color) {
+  tft.drawCircle(x, y, 7, color);
+  tft.drawCircle(x, y, 4, color);
+  tft.fillCircle(x, y, 2, color);
+  // Crosshair
+  tft.drawLine(x - 10, y, x - 8, y, color);
+  tft.drawLine(x + 8, y, x + 10, y, color);
+  tft.drawLine(x, y - 10, x, y - 8, color);
+  tft.drawLine(x, y + 8, x, y + 10, color);
+}
+
+void showSplashScreen() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(2);
+
+  int16_t x1, y1;
+  uint16_t w1, h1;
+  tft.getTextBounds("Smart", 0, 0, &x1, &y1, &w1, &h1);
+  int xPos1 = (160 - w1) / 2;
+  int yPos1 = (128 / 2) - h1 - 5;
+
+  tft.setCursor(xPos1, yPos1);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.println("Smart");
+
+  tft.getTextBounds("Humidifier", 0, 0, &x1, &y1, &w1, &h1);
+  int xPos2 = (160 - w1) / 2;
+  int yPos2 = yPos1 + h1 + 5;
+
+  tft.setCursor(xPos2, yPos2);
+  tft.setTextColor(ST77XX_GREEN);
+  tft.println("Humidifier");
+
+  delay(1500);
 }
