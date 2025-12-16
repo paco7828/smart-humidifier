@@ -19,6 +19,7 @@ RGB Led functionality:
 constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
 constexpr uint8_t TFT_DC = 3;
+constexpr uint8_t TFT_LED = 8;
 constexpr uint8_t DHT_PIN = 1;
 constexpr uint8_t HUMID_PIN = 5;
 constexpr uint8_t BUTTON_PIN = 0;
@@ -39,7 +40,7 @@ String receivedCommand = "";
 // BLE Advertising
 bool isAdvertising = false;
 unsigned long advertisingStartTime = 0;
-constexpr unsigned long ADVERTISING_DURATION = 180000;  // 3 minutes
+constexpr unsigned long ADVERTISING_DURATION = 120000;  // 2 minutes
 bool firstBoot = true;
 
 // BLE Server & Advertising pointers
@@ -66,6 +67,22 @@ enum Mode {
 };
 Mode currentMode = AUTONOMOUS;  // default mode
 
+// Display states
+enum DisplayState {
+  DISPLAY_OFF,
+  DISPLAY_ON,
+  DISPLAY_SLEEPING
+};
+DisplayState displayState = DISPLAY_ON;
+
+// Display timing
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastDisplayWake = 0;
+unsigned long displaySleepStartTime = 0;
+constexpr unsigned long DISPLAY_UPDATE_INTERVAL = 2000;   // 2 seconds
+constexpr unsigned long DISPLAY_WAKE_INTERVAL = 1800000;  // 30 minutes (30 * 60 * 1000)
+constexpr unsigned long DISPLAY_WAKE_DURATION = 60000;    // 1 minute (60 * 1000)
+
 // Autonomous mode
 float humidityThreshold = 50.0;
 float hysteresis = 5.0;
@@ -77,11 +94,6 @@ constexpr unsigned long MIN_RUNTIME = 300000;  // 5 minutes
 unsigned long timedInterval = 3600;  // 1 hour (seconds)
 unsigned long timedDuration = 300;   // 5 minutes (seconds)
 unsigned long lastTimedStart = 0;
-
-// Display
-bool displayOn = true;
-unsigned long lastDisplayUpdate = 0;
-constexpr unsigned long DISPLAY_UPDATE_INTERVAL = 2000;  // 2 seconds
 
 // Temperature & humidity
 float currentTemp = 0;
@@ -130,6 +142,10 @@ void setup() {
   pinMode(HUMID_PIN, OUTPUT);
   digitalWrite(HUMID_PIN, LOW);
 
+  // TFT Backlight LED
+  pinMode(TFT_LED, OUTPUT);
+  digitalWrite(TFT_LED, HIGH);
+
   // Display
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(3);
@@ -138,8 +154,10 @@ void setup() {
   showSplashScreen();
   initDisplay();
 
-  // Initialize display timer
+  // Initialize display timers
   lastDisplayUpdate = millis();
+  lastDisplayWake = millis();
+  displaySleepStartTime = millis();
 }
 
 void loop() {
@@ -153,9 +171,10 @@ void loop() {
     stopBLEAdvertising();
   }
 
-  // Button press detection
+  // Button press detection => display wake up
   if (button.isPressed()) {
     startBLEAdvertising();
+    wakeDisplay();
   }
 
   // BLE Command
@@ -171,6 +190,25 @@ void loop() {
     currentHumidity = dht.readHumidity();
   }
 
+  // Display state management
+  switch (displayState) {
+    case DISPLAY_ON:
+      if (now - lastDisplayWake >= DISPLAY_WAKE_DURATION) {
+        sleepDisplay();
+      }
+      break;
+
+    case DISPLAY_SLEEPING:
+      if (now - displaySleepStartTime >= DISPLAY_WAKE_INTERVAL) {
+        wakeDisplay();
+      }
+      break;
+
+    case DISPLAY_OFF:
+      // Display is manually turned off
+      break;
+  }
+
   // Mode handling
   if (currentMode == AUTONOMOUS) {
     handleAutonomousMode(now);
@@ -178,11 +216,44 @@ void loop() {
     handleTimedMode(now);
   }
 
-  // Display
-  if (displayOn && (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL)) {
+  // Update display if turned on
+  if (displayState == DISPLAY_ON && (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL)) {
     lastDisplayUpdate = now;
     updateDisplay();
   }
+}
+
+void wakeDisplay() {
+  // Can wake from sleeping or off states
+  if (displayState == DISPLAY_SLEEPING || displayState == DISPLAY_OFF) {
+    displayState = DISPLAY_ON;
+    lastDisplayWake = millis();
+    digitalWrite(TFT_LED, HIGH);
+    initDisplay();
+    lastDisplayUpdate = 0;
+    Serial.print("Display woken up - ");
+    Serial.println(displayState == DISPLAY_ON ? "ON" : "OTHER");
+  }
+}
+
+void sleepDisplay() {
+  if (displayState == DISPLAY_ON) {
+    displayState = DISPLAY_SLEEPING;
+    displaySleepStartTime = millis();
+    digitalWrite(TFT_LED, LOW);
+    tft.fillScreen(ST77XX_BLACK);
+    displayInitialized = false;
+
+    Serial.println("Display sleeping");
+  }
+}
+
+void turnOffDisplay() {
+  displayState = DISPLAY_OFF;
+  digitalWrite(TFT_LED, LOW);
+  tft.fillScreen(ST77XX_BLACK);
+  displayInitialized = false;
+  Serial.println("Display turned off manually");
 }
 
 void startBLEAdvertising() {
@@ -395,12 +466,10 @@ void processCommand(String cmd) {
       }
     }
   } else if (cmd == "DON") {
-    displayOn = true;
+    wakeDisplay();
     resp = "Display on";
-    initDisplay();
   } else if (cmd == "DOFF") {
-    displayOn = false;
-    displayInitialized = false;
+    turnOffDisplay();
     resp = "Display off";
   } else if (cmd == "AUTO") {
     currentMode = AUTONOMOUS;
