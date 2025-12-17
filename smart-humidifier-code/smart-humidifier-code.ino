@@ -487,6 +487,16 @@ void sendBLE(String msg) {
   }
 }
 
+/*
+Command list:
+  DON -> Display On
+  DOFF -> Display Off
+  AUTO -> Sets autonomous mode
+  TIMED -> Sets timed mode
+  INTRVL---- -> Sets humidification interval when timed mode is enabled (replace the '----' with seconds)
+  FOR---- -> Sets humidification time - 'for how long' (replace the '----' with seconds)
+  THRESHOLD--- -> Sets goal threshold to be reached with humidification (replace the '---' with percentage)
+*/
 void processCommand(String cmd) {
   String resp = "";
 
@@ -529,17 +539,8 @@ void processCommand(String cmd) {
       timedDuration = val;
       resp = "Duration OK: " + String(val) + "s";
     }
-  } else if (cmd == "BLEON") {
-    if (!isAdvertising) {
-      startBLEAdvertising();
-      resp = "BLE Advertising started";
-    } else {
-      resp = "BLE already running";
-    }
-  } else if (cmd == "BLEOFF") {
-    stopBLEAdvertising();
-    resp = "BLE Advertising stopped";
-  } else if (cmd.startsWith("THRESH")) {
+  }
+  else if (cmd.startsWith("THRESHOLD")) {
     float val = cmd.substring(6).toFloat();
     if (val < 20.0 || val > 80.0) {
       resp = "Threshold must be between 20% and 80%";
