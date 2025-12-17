@@ -6,7 +6,7 @@
 constexpr uint8_t TFT_CS = 7;
 constexpr uint8_t TFT_RST = 2;
 constexpr uint8_t TFT_DC = 3;
-constexpr uint8_t TFT_LED = 8;
+constexpr uint8_t TFT_LED = 0;
 constexpr uint8_t DHT_PIN = 9;
 constexpr uint8_t HUMID_PIN = 5;
 constexpr uint8_t BUTTON_PIN = 1;
