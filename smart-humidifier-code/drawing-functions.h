@@ -1,11 +1,17 @@
 #pragma once
 
 void drawBluetoothIcon(int x, int y, uint16_t color) {
-  tft.drawLine(x + 4, y, x + 4, y + 12, color);
-  tft.drawLine(x + 4, y + 6, x + 10, y, color);
-  tft.drawLine(x + 4, y + 6, x + 10, y + 12, color);
-  tft.drawLine(x + 10, y, x + 16, y + 6, color);
-  tft.drawLine(x + 10, y + 12, x + 16, y + 6, color);
+  tft.fillRect(x + 6, y + 1, 2, 14, color);
+  tft.drawLine(x + 7, y + 1, x + 13, y + 5, color);
+  tft.drawLine(x + 7, y + 1, x + 7, y + 7, color);
+  tft.drawLine(x + 7, y + 7, x + 13, y + 5, color);
+  tft.drawLine(x + 7, y + 8, x + 13, y + 10, color);
+  tft.drawLine(x + 7, y + 8, x + 7, y + 14, color);
+  tft.drawLine(x + 7, y + 14, x + 13, y + 10, color);
+  tft.drawLine(x + 1, y + 11, x + 7, y + 4, color);
+  tft.drawLine(x + 2, y + 11, x + 8, y + 4, color);
+  tft.drawLine(x + 1, y + 4, x + 7, y + 11, color);
+  tft.drawLine(x + 2, y + 4, x + 8, y + 11, color);
 }
 
 void drawTemperatureIcon(int x, int y, uint16_t color) {
