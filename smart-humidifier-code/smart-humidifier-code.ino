@@ -30,11 +30,11 @@ void sendBLE(String msg);
 void processCommand(String cmd);
 
 void setup() {
-  rtcState.bootCount++;
-
-  // GPIO hold enable
+  // GPIO hold disable
   gpio_hold_dis((gpio_num_t)HUMID_PIN);
   gpio_hold_dis((gpio_num_t)BUTTON_PIN);
+
+  rtcState.bootCount++;
 
   // Restore state from RTC memory
   if (rtcState.bootCount > 1) {
@@ -58,7 +58,7 @@ void setup() {
   pinMode(TFT_RST, OUTPUT);
 
   // Initialize button
-  pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+  pinMode(BUTTON_PIN, INPUT);
   button.setDebounceTime(100);
 
   // Initialize DHT sensor
@@ -81,6 +81,12 @@ void setup() {
   displayState = DISPLAY_ON;
   lastDisplayWake = millis();
 
+  // Only start BLE on first boot & button wakeup
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (rtcState.bootCount == 1 || wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED || wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+    startBLEAdvertising();
+  }
+
   // Read sensor values
   float newTemp = dht.readTemperature();
   float newHumidity = dht.readHumidity();
@@ -102,10 +108,6 @@ void loop() {
   if (button.isPressed()) {
     lastActivityTime = now;
     wakeDisplay();
-
-    if (!isAdvertising) {
-      startBLEAdvertising();
-    }
   }
 
   // Process BLE commands
@@ -211,8 +213,25 @@ void prepareForDeepSleep(unsigned long sleepTimeMs) {
   // Set desired state
   gpio_set_direction((gpio_num_t)HUMID_PIN, GPIO_MODE_OUTPUT);
   gpio_set_level((gpio_num_t)HUMID_PIN, isHumidifying ? 1 : 0);
-  gpio_hold_en((gpio_num_t)HUMID_PIN);  // enable hold
-
+  gpio_hold_en((gpio_num_t)HUMID_PIN);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  delay(200);
+  
+  // Timed wakeup
+  if (sleepTimeMs > 0) {
+    esp_sleep_enable_timer_wakeup(sleepTimeMs * 1000ULL);
+  }
+  
+  // GPIO wakeup
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  gpio_num_t button_gpio = (gpio_num_t)BUTTON_PIN;
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << button_gpio, ESP_GPIO_WAKEUP_GPIO_LOW);
+  
+  // Display pins low
+  digitalWrite(TFT_CS, LOW);
+  digitalWrite(TFT_DC, LOW);
+  digitalWrite(TFT_RST, LOW);
+  
   // Stop BLE advertisement
   if (isAdvertising || bleInitialized) {
     if (pAdvertising) {
@@ -224,12 +243,6 @@ void prepareForDeepSleep(unsigned long sleepTimeMs) {
     bleInitialized = false;
   }
 
-  // GPIO wakeup config
-  esp_deep_sleep_enable_gpio_wakeup(1 << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
-
-  // Set timer wakeup
-  esp_sleep_enable_timer_wakeup(sleepTimeMs * 1000ULL);
-  delay(100);
   esp_deep_sleep_start();
 }
 
