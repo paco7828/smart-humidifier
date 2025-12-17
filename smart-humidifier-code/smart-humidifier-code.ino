@@ -7,232 +7,303 @@
 #include <SPI.h>
 #include <DHT.h>
 #include <ezButton.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#include "config.h"
+#include "drawing-functions.h"
 
-/*
-RGB Led functionality:
-  -When humidifying needed in timed mode => pulsing red | else => pulsing green
-  -When bluetooth client is present => pulsing blue
-  -When known bluetooth command received => double green "beep" | else => double red "beep"
-*/
-
-// Pins
-constexpr uint8_t TFT_CS = 7;
-constexpr uint8_t TFT_RST = 2;
-constexpr uint8_t TFT_DC = 3;
-constexpr uint8_t TFT_LED = 8;
-constexpr uint8_t DHT_PIN = 1;
-constexpr uint8_t HUMID_PIN = 5;
-constexpr uint8_t BUTTON_PIN = 0;
-
-// Temperature & humidity
-#define DHT_TYPE DHT22
-DHT dht(DHT_PIN, DHT_TYPE);
-
-// Display
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
-
-// BLE
-#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-BLECharacteristic *pCharacteristic = NULL;
-String receivedCommand = "";
-
-// BLE Advertising
-bool isAdvertising = false;
-unsigned long advertisingStartTime = 0;
-constexpr unsigned long ADVERTISING_DURATION = 120000;  // 2 minutes
-bool firstBoot = true;
-
-// BLE Server & Advertising pointers
-BLEServer *pServer = NULL;
-BLEAdvertising *pAdvertising = NULL;
-
-// Button
-ezButton button(BUTTON_PIN);
-
-class SmartHumidifierCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) {
-    String value = pCharacteristic->getValue().c_str();
-    if (value.length() > 0) {
-      receivedCommand = value;
-      receivedCommand.trim();
-    }
-  }
-};
-
-// Operating modes
-enum Mode {
-  AUTONOMOUS,
-  TIMED
-};
-Mode currentMode = AUTONOMOUS;  // default mode
-
-// Display states
-enum DisplayState {
-  DISPLAY_OFF,
-  DISPLAY_ON,
-  DISPLAY_SLEEPING
-};
-DisplayState displayState = DISPLAY_ON;
-
-// Display timing
-unsigned long lastDisplayUpdate = 0;
-unsigned long lastDisplayWake = 0;
-unsigned long displaySleepStartTime = 0;
-constexpr unsigned long DISPLAY_UPDATE_INTERVAL = 2000;   // 2 seconds
-constexpr unsigned long DISPLAY_WAKE_INTERVAL = 1800000;  // 30 minutes (30 * 60 * 1000)
-constexpr unsigned long DISPLAY_WAKE_DURATION = 60000;    // 1 minute (60 * 1000)
-
-// Autonomous mode
-float humidityThreshold = 50.0;
-float hysteresis = 5.0;
-bool isHumidifying = false;
-unsigned long humidifyStartTime = 0;
-constexpr unsigned long MIN_RUNTIME = 300000;  // 5 minutes
-
-// Timed mode
-unsigned long timedInterval = 3600;  // 1 hour (seconds)
-unsigned long timedDuration = 300;   // 5 minutes (seconds)
-unsigned long lastTimedStart = 0;
-
-// Temperature & humidity
-float currentTemp = 0;
-float currentHumidity = 0;
-unsigned long lastSensorRead = 0;
-constexpr unsigned long SENSOR_READ_INTERVAL = 2000;  // 2 seconds
-
-// Previous display values for change detection
-float prevTemp = -999;
-float prevHumidity = -999;
-float prevThreshold = -999;
-Mode prevMode = AUTONOMOUS;
-bool displayInitialized = false;
-
-// RGB
-uint8_t rgbR = 0, rgbG = 0, rgbB = 0;
+// Function prototypes
+unsigned long calculateOptimalSleepTime(unsigned long now);
+void prepareForDeepSleep(unsigned long sleepTimeMs);
+void startBLEAdvertising();
+void stopBLEAdvertising();
+void wakeDisplay();
+void sleepDisplay();
+void turnOffDisplay();
+void handleAutonomousMode(unsigned long now);
+void handleTimedMode(unsigned long now);
+void startHumidifier(unsigned long now);
+void stopHumidifier();
+void initDisplay();
+void updateDisplay();
+void sendBLE(String msg);
+void processCommand(String cmd);
 
 void setup() {
-  Serial.begin(115200);
+  rtcState.bootCount++;
 
-  // Button setup
-  button.setDebounceTime(50);
+  // GPIO hold enable
+  gpio_hold_dis((gpio_num_t)HUMID_PIN);
+  gpio_hold_dis((gpio_num_t)BUTTON_PIN);
 
-  // BLE Setup
-  BLEDevice::init("Smart-Humidifier");
-  pServer = BLEDevice::createServer();
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
-  pCharacteristic->setCallbacks(new SmartHumidifierCallbacks());
-  pService->start();
-  pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
+  // Restore state from RTC memory
+  if (rtcState.bootCount > 1) {
+    currentMode = (Mode)rtcState.savedMode;
+    humidityThreshold = rtcState.savedHumidityThreshold;
+    timedInterval = rtcState.savedTimedInterval;
+    timedDuration = rtcState.savedTimedDuration;
+    lastTimedStart = rtcState.lastTimedStartTime;
+    humidifyStartTime = rtcState.humidifyStartTime;
+    isHumidifying = rtcState.wasHumidifying;
+    displaySleepStartTime = rtcState.displaySleepStart;
+    currentTemp = rtcState.lastTemp;
+    currentHumidity = rtcState.lastHumidity;
+  }
 
-  startBLEAdvertising();
+  // Initialize pins
+  pinMode(HUMID_PIN, OUTPUT);
+  pinMode(TFT_LED, OUTPUT);
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  pinMode(TFT_RST, OUTPUT);
 
+  // Initialize button
+  pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+  button.setDebounceTime(100);
+
+  // Initialize DHT sensor
   dht.begin();
 
-  // Read sensor once immediately for initial display values
-  currentTemp = dht.readTemperature();
-  currentHumidity = dht.readHumidity();
-  lastSensorRead = millis();
-
-  // Humidifier
-  pinMode(HUMID_PIN, OUTPUT);
-  digitalWrite(HUMID_PIN, LOW);
-
-  // TFT Backlight LED
-  pinMode(TFT_LED, OUTPUT);
-  digitalWrite(TFT_LED, HIGH);
-
-  // Display
+  // Initialize display
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(3);
+
+  // Turn on display
+  digitalWrite(TFT_LED, HIGH);
   tft.fillScreen(ST77XX_BLACK);
 
-  showSplashScreen();
-  initDisplay();
+  // First boot => show data
+  if (rtcState.bootCount == 1) {
+    showSplashScreen();
+  }
 
-  // Initialize display timers
-  lastDisplayUpdate = millis();
+  initDisplay();
+  displayState = DISPLAY_ON;
   lastDisplayWake = millis();
-  displaySleepStartTime = millis();
+
+  // Read sensor values
+  float newTemp = dht.readTemperature();
+  float newHumidity = dht.readHumidity();
+
+  if (!isnan(newTemp)) currentTemp = newTemp;
+  if (!isnan(newHumidity)) currentHumidity = newHumidity;
+
+  lastSensorRead = millis();
+  lastActivityTime = millis();
 }
 
 void loop() {
   unsigned long now = millis();
 
-  // Button handling
+  // Update button state
   button.loop();
 
-  // BLE Advertising timeout check
-  if (isAdvertising && (now - advertisingStartTime >= ADVERTISING_DURATION)) {
-    stopBLEAdvertising();
-  }
-
-  // Button press detection => display wake up
+  // Handle button press
   if (button.isPressed()) {
-    startBLEAdvertising();
+    lastActivityTime = now;
     wakeDisplay();
+
+    if (!isAdvertising) {
+      startBLEAdvertising();
+    }
   }
 
-  // BLE Command
-  if (receivedCommand.length() > 0) {
+  // Process BLE commands
+  if (receivedCommand.length()) {
+    lastActivityTime = now;
     processCommand(receivedCommand);
     receivedCommand = "";
   }
 
-  // Temperature & humidity
+  // Check BLE advertising timeout
+  if (isAdvertising && advertisingStartTime > 0) {
+    if (now >= advertisingStartTime) {
+      unsigned long bleElapsed = now - advertisingStartTime;
+      if (bleElapsed >= ADVERTISING_DURATION) {
+        stopBLEAdvertising();
+      }
+    }
+  }
+
+  // Handle sensor reading
   if (now - lastSensorRead >= SENSOR_READ_INTERVAL) {
     lastSensorRead = now;
-    currentTemp = dht.readTemperature();
-    currentHumidity = dht.readHumidity();
+    float newTemp = dht.readTemperature();
+    float newHumidity = dht.readHumidity();
+
+    if (!isnan(newTemp)) currentTemp = newTemp;
+    if (!isnan(newHumidity)) currentHumidity = newHumidity;
+
+    rtcState.lastTemp = currentTemp;
+    rtcState.lastHumidity = currentHumidity;
+    rtcState.lastSensorReadTime = lastSensorRead;
   }
 
-  // Display state management
-  switch (displayState) {
-    case DISPLAY_ON:
-      if (now - lastDisplayWake >= DISPLAY_WAKE_DURATION) {
-        sleepDisplay();
-      }
-      break;
+  // Handle display state machine
+  if (displayState == DISPLAY_ON) {
+    if (now - lastDisplayWake >= DISPLAY_WAKE_DURATION) {
+      sleepDisplay();
+    }
 
-    case DISPLAY_SLEEPING:
-      if (now - displaySleepStartTime >= DISPLAY_WAKE_INTERVAL) {
-        wakeDisplay();
-      }
-      break;
-
-    case DISPLAY_OFF:
-      // Display is manually turned off
-      break;
+    if (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+      lastDisplayUpdate = now;
+      updateDisplay();
+    }
+  } else if (displayState == DISPLAY_SLEEPING) {
+    if (now - displaySleepStartTime >= DISPLAY_WAKE_INTERVAL) {
+      wakeDisplay();
+    }
   }
 
-  // Mode handling
+  // Handle mode-specific logic
   if (currentMode == AUTONOMOUS) {
     handleAutonomousMode(now);
   } else {
     handleTimedMode(now);
   }
 
-  // Update display if turned on
-  if (displayState == DISPLAY_ON && (now - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL)) {
-    lastDisplayUpdate = now;
-    updateDisplay();
+  // Power management
+  if (displayState == DISPLAY_SLEEPING && !isAdvertising) {
+    unsigned long sleepTime = calculateOptimalSleepTime(now);
+    prepareForDeepSleep(sleepTime);
+  }
+
+  delay(10);
+}
+
+unsigned long calculateOptimalSleepTime(unsigned long now) {
+  // Wait for humidification to end
+  if (isHumidifying) {
+    if (currentMode == AUTONOMOUS) {
+      unsigned long runTime = now - humidifyStartTime;
+      if (runTime < MIN_RUNTIME) {
+        return MIN_RUNTIME - runTime;
+      }
+    } else if (currentMode == TIMED) {
+      unsigned long elapsed = (now - lastTimedStart) / 1000;
+      if (elapsed < timedDuration) {
+        return (timedDuration - elapsed) * 1000;
+      }
+    }
+    stopHumidifier();
+  }
+  return DISPLAY_WAKE_INTERVAL;
+}
+
+void prepareForDeepSleep(unsigned long sleepTimeMs) {
+  // Save into RTC memory
+  rtcState.wasSleeping = (displayState == DISPLAY_SLEEPING);
+  rtcState.savedMode = currentMode;
+  rtcState.savedHumidityThreshold = humidityThreshold;
+  rtcState.savedTimedInterval = timedInterval;
+  rtcState.savedTimedDuration = timedDuration;
+  rtcState.lastTimedStartTime = lastTimedStart;
+  rtcState.humidifyStartTime = humidifyStartTime;
+  rtcState.wasHumidifying = isHumidifying;
+  rtcState.displayState = displayState;
+  rtcState.displaySleepStart = displaySleepStartTime;
+
+  // Display off
+  digitalWrite(TFT_LED, LOW);
+  tft.writeCommand(ST77XX_SLPIN);
+  delay(10);
+
+  // Set desired state
+  gpio_set_direction((gpio_num_t)HUMID_PIN, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)HUMID_PIN, isHumidifying ? 1 : 0);
+  gpio_hold_en((gpio_num_t)HUMID_PIN);  // enable hold
+
+  // Stop BLE advertisement
+  if (isAdvertising || bleInitialized) {
+    if (pAdvertising) {
+      pAdvertising->stop();
+    }
+    BLEDevice::deinit(true);
+    delay(100);
+    isAdvertising = false;
+    bleInitialized = false;
+  }
+
+  // GPIO wakeup config
+  esp_deep_sleep_enable_gpio_wakeup(1 << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+
+  // Set timer wakeup
+  esp_sleep_enable_timer_wakeup(sleepTimeMs * 1000ULL);
+  delay(100);
+  esp_deep_sleep_start();
+}
+
+void startBLEAdvertising() {
+  wakeDisplay();
+
+  if (bleInitialized && pAdvertising) {
+    pAdvertising->stop();
+  }
+
+  if (bleInitialized) {
+    BLEDevice::deinit(true);
+    delay(200);
+    bleInitialized = false;
+    pCallbacks = NULL;
+  }
+
+  BLEDevice::init(bleDeviceName);
+  BLEDevice::setMTU(128);
+
+  pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+
+  // Create callback object
+  if (pCallbacks == NULL) {
+    pCallbacks = new SmartHumidifierCallbacks();
+  }
+  pCharacteristic->setCallbacks(pCallbacks);
+  pCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+
+  pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMaxPreferred(0x12);
+  pAdvertising->start();
+
+  bleInitialized = true;
+  isAdvertising = true;
+  advertisingStartTime = millis();
+}
+
+void stopBLEAdvertising() {
+  if (isAdvertising && pAdvertising) {
+    pAdvertising->stop();
+    delay(100);
+    isAdvertising = false;
+  }
+
+  if (bleInitialized) {
+    BLEDevice::deinit(true);
+    delay(200);
+    bleInitialized = false;
   }
 }
 
 void wakeDisplay() {
-  // Can wake from sleeping or off states
-  if (displayState == DISPLAY_SLEEPING || displayState == DISPLAY_OFF) {
+  if (displayState == DISPLAY_OFF || displayState == DISPLAY_SLEEPING) {
     displayState = DISPLAY_ON;
     lastDisplayWake = millis();
+    displaySleepStartTime = 0;
+    lastDisplayUpdate = 0;
+    tft.writeCommand(ST77XX_SLPOUT);
+    delay(120);
     digitalWrite(TFT_LED, HIGH);
     initDisplay();
-    lastDisplayUpdate = 0;
-    Serial.print("Display woken up - ");
-    Serial.println(displayState == DISPLAY_ON ? "ON" : "OTHER");
+    displayInitialized = true;
+    lastActivityTime = millis();
   }
 }
 
@@ -240,11 +311,14 @@ void sleepDisplay() {
   if (displayState == DISPLAY_ON) {
     displayState = DISPLAY_SLEEPING;
     displaySleepStartTime = millis();
-    digitalWrite(TFT_LED, LOW);
-    tft.fillScreen(ST77XX_BLACK);
-    displayInitialized = false;
 
-    Serial.println("Display sleeping");
+    if (isAdvertising) {
+      stopBLEAdvertising();
+    }
+
+    tft.writeCommand(ST77XX_SLPIN);
+    digitalWrite(TFT_LED, LOW);
+    displayInitialized = false;
   }
 }
 
@@ -253,42 +327,15 @@ void turnOffDisplay() {
   digitalWrite(TFT_LED, LOW);
   tft.fillScreen(ST77XX_BLACK);
   displayInitialized = false;
-  Serial.println("Display turned off manually");
-}
-
-void startBLEAdvertising() {
-  if (!isAdvertising) {
-    pAdvertising->start();
-    isAdvertising = true;
-    advertisingStartTime = millis();
-
-    if (firstBoot) {
-      firstBoot = false;
-    }
-
-    Serial.println("BLE Advertising started");
-  }
-}
-
-void stopBLEAdvertising() {
-  if (isAdvertising) {
-    pAdvertising->stop();
-    isAdvertising = false;
-    Serial.println("BLE Advertising stopped");
-  }
 }
 
 void handleAutonomousMode(unsigned long now) {
-  // Wrong humidity value
-  if (isnan(currentHumidity))
-    return;
+  if (isnan(currentHumidity)) return;
 
-  unsigned long runTime = now - humidifyStartTime;
-
-  // Humidification with hysteresis
   if (isHumidifying) {
-    if (runTime < MIN_RUNTIME)
-      return;
+    unsigned long runTime = now - humidifyStartTime;
+    if (runTime < MIN_RUNTIME) return;
+
     if (currentHumidity > (humidityThreshold + hysteresis)) {
       stopHumidifier();
     }
@@ -300,11 +347,18 @@ void handleAutonomousMode(unsigned long now) {
 }
 
 void handleTimedMode(unsigned long now) {
+  if (timedModeFirstCycle) {
+    lastTimedStart = now;
+    timedModeFirstCycle = false;
+  }
+
   unsigned long elapsed = (now - lastTimedStart) / 1000;
 
   if (isHumidifying) {
-    if (elapsed >= timedDuration)
+    if (elapsed >= timedDuration) {
       stopHumidifier();
+      lastTimedStart = now;
+    }
   } else {
     if (elapsed >= timedInterval) {
       startHumidifier(now);
@@ -317,6 +371,7 @@ void startHumidifier(unsigned long now) {
   isHumidifying = true;
   humidifyStartTime = now;
   digitalWrite(HUMID_PIN, HIGH);
+  lastActivityTime = now;
 }
 
 void stopHumidifier() {
@@ -330,7 +385,6 @@ void initDisplay() {
   int yPos = 5;
   int iconX = 25;
 
-  // Draw all icons
   drawTemperatureIcon(iconX, yPos, ST77XX_YELLOW);
   yPos += 32;
   drawWaterDropIcon(iconX, yPos, ST77XX_BLUE);
@@ -341,7 +395,6 @@ void initDisplay() {
 
   displayInitialized = true;
 
-  // Force value update
   prevTemp = -999;
   prevHumidity = -999;
   prevThreshold = -999;
@@ -352,16 +405,15 @@ void initDisplay() {
 void updateDisplay() {
   if (!displayInitialized) {
     initDisplay();
+    return;
   }
 
   int textX = 60;
 
-  // Update temperature if changed
+  // Update temperature
   if (abs(currentTemp - prevTemp) > 0.05) {
     int yPos = 5;
-    // Clear previous value area
     tft.fillRect(textX, yPos, 100, 16, ST77XX_BLACK);
-    // Draw new value
     tft.setCursor(textX, yPos);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_CYAN);
@@ -371,12 +423,10 @@ void updateDisplay() {
     prevTemp = currentTemp;
   }
 
-  // Update humidity if changed
+  // Update humidity
   if (abs(currentHumidity - prevHumidity) > 0.05) {
     int yPos = 37;
-    // Clear previous value area
     tft.fillRect(textX, yPos, 100, 16, ST77XX_BLACK);
-    // Draw new value
     tft.setCursor(textX, yPos);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_CYAN);
@@ -385,12 +435,10 @@ void updateDisplay() {
     prevHumidity = currentHumidity;
   }
 
-  // Update threshold if changed
+  // Update threshold
   if (abs(humidityThreshold - prevThreshold) > 0.05) {
-    int yPos = 77 - 8;
-    // Clear previous value area
+    int yPos = 69;
     tft.fillRect(textX, yPos, 100, 16, ST77XX_BLACK);
-    // Draw new value
     tft.setCursor(textX, yPos);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_CYAN);
@@ -399,12 +447,10 @@ void updateDisplay() {
     prevThreshold = humidityThreshold;
   }
 
-  // Update mode if changed
+  // Update mode
   if (currentMode != prevMode) {
-    int yPos = 109 - 8;
-    // Clear previous value area
+    int yPos = 101;
     tft.fillRect(textX, yPos, 100, 16, ST77XX_BLACK);
-    // Draw new value
     tft.setCursor(textX, yPos);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_CYAN);
@@ -412,60 +458,26 @@ void updateDisplay() {
     prevMode = currentMode;
   }
 
-  // Draw BLE icon if advertising
-  drawBLEIcon();
-}
-
-void drawBLEIcon() {
-  int x = 130;
-  int y = 110;
-  tft.fillRect(x, y, 20, 16, ST77XX_BLACK);
-
+  // Draw BLE icon
   if (isAdvertising) {
-    drawBluetoothIcon(x, y, ST77XX_BLUE);
+    drawBluetoothIcon(130, 110, ST77XX_BLUE);
+  } else {
+    tft.fillRect(130, 110, 20, 16, ST77XX_BLACK);
   }
-}
-
-void drawBluetoothIcon(int x, int y, uint16_t color) {
-  tft.drawLine(x + 4, y, x + 4, y + 12, color);
-  tft.drawLine(x + 4, y + 6, x + 10, y, color);
-  tft.drawLine(x + 4, y + 6, x + 10, y + 12, color);
-  tft.drawLine(x + 10, y, x + 16, y + 6, color);
-  tft.drawLine(x + 10, y + 12, x + 16, y + 6, color);
 }
 
 void sendBLE(String msg) {
-  if (pCharacteristic) {
+  if (pCharacteristic && isAdvertising) {
     pCharacteristic->setValue(msg.c_str());
     pCharacteristic->notify();
+    delay(10);
   }
-  Serial.println(msg);
 }
 
 void processCommand(String cmd) {
   String resp = "";
 
-  // RGB (RRR;GGG;BBB)
-  if (cmd.indexOf(';') >= 0) {
-    int s1 = cmd.indexOf(';');
-    int s2 = cmd.indexOf(';', s1 + 1);
-    if (s2 > 0) {
-      int r = cmd.substring(0, s1).toInt();
-      int g = cmd.substring(s1 + 1, s2).toInt();
-      int b = cmd.substring(s2 + 1).toInt();
-
-      if (r < 0 || g < 0 || b < 0) {
-        resp = "Minimum value is 0!";
-      } else if (r > 255 || g > 255 || b > 255) {
-        resp = "Maximum value is 255!";
-      } else {
-        rgbR = r;
-        rgbG = g;
-        rgbB = b;
-        resp = "RGB OK";
-      }
-    }
-  } else if (cmd == "DON") {
+  if (cmd == "DON") {
     wakeDisplay();
     resp = "Display on";
   } else if (cmd == "DOFF") {
@@ -473,107 +485,59 @@ void processCommand(String cmd) {
     resp = "Display off";
   } else if (cmd == "AUTO") {
     currentMode = AUTONOMOUS;
+    timedModeFirstCycle = true;
     resp = "Autonomous mode";
   } else if (cmd == "TIMED") {
     currentMode = TIMED;
     lastTimedStart = millis();
-    resp = "Timed mode\nInterval:" + String(timedInterval) + "\nFor:" + String(timedDuration) + "\n";
+    timedModeFirstCycle = false;
+    resp = "Timed mode\nInterval:" + String(timedInterval) + "s\nFor:" + String(timedDuration) + "s";
   } else if (cmd.startsWith("INTRVL")) {
     int val = cmd.substring(6).toInt();
-    if (val < 300)
+    if (val < 300) {
       resp = "Minimum is 5 minutes (300 seconds)";
-    else if (val > 14400)
+    } else if (val > 14400) {
       resp = "Maximum is 4 hours (14400 seconds)";
-    else if (val <= timedDuration)
+    } else if (val <= timedDuration) {
       resp = "Value can't be less than or equal to FOR (" + String(timedDuration) + ")";
-    else {
+    } else {
       timedInterval = val;
-      resp = "Interval OK";
+      resp = "Interval OK: " + String(val) + "s";
     }
   } else if (cmd.startsWith("FOR")) {
     int val = cmd.substring(3).toInt();
-    if (val < 300)
+    if (val < 300) {
       resp = "Minimum is 5 minutes (300 seconds)";
-    else if (val > 1800)
+    } else if (val > 1800) {
       resp = "Maximum is 30 minutes (1800 seconds)";
-    else if (val >= timedInterval)
+    } else if (val >= timedInterval) {
       resp = "Value can't be more than or equal to INTRVL (" + String(timedInterval) + ")";
-    else {
+    } else {
       timedDuration = val;
-      resp = "Duration OK";
+      resp = "Duration OK: " + String(val) + "s";
     }
   } else if (cmd == "BLEON") {
-    startBLEAdvertising();
-    resp = "BLE Advertising started";
+    if (!isAdvertising) {
+      startBLEAdvertising();
+      resp = "BLE Advertising started";
+    } else {
+      resp = "BLE already running";
+    }
   } else if (cmd == "BLEOFF") {
     stopBLEAdvertising();
     resp = "BLE Advertising stopped";
+  } else if (cmd.startsWith("THRESH")) {
+    float val = cmd.substring(6).toFloat();
+    if (val < 20.0 || val > 80.0) {
+      resp = "Threshold must be between 20% and 80%";
+    } else {
+      humidityThreshold = val;
+      resp = "Threshold set to " + String(val, 1) + "%";
+    }
   } else {
-    resp = "Unknown command";
+    resp = "Unknown command: " + cmd;
   }
 
   sendBLE(resp);
-  Serial.println(cmd + " -> " + resp);
-}
-
-void drawTemperatureIcon(int x, int y, uint16_t color) {
-  tft.fillCircle(x, y + 18, 7, color);   // Bulb
-  tft.fillRect(x - 3, y, 6, 18, color);  // Tube
-  // Mercury
-  tft.fillRect(x - 1, y + 4, 2, 14, ST77XX_RED);
-  tft.fillCircle(x, y + 18, 4, ST77XX_RED);
-}
-
-void drawWaterDropIcon(int x, int y, uint16_t color) {
-  tft.fillCircle(x, y + 15, 6, color);
-  tft.fillTriangle(x, y, x - 6, y + 15, x + 6, y + 15, color);
-}
-
-void drawModeIcon(int x, int y, uint16_t color) {
-  tft.drawCircle(x, y, 7, color);
-  tft.fillCircle(x, y, 2, color);
-  tft.drawLine(x - 10, y, x - 7, y, color);
-  tft.drawLine(x + 7, y, x + 10, y, color);
-  tft.drawLine(x, y - 10, x, y - 7, color);
-  tft.drawLine(x, y + 7, x, y + 10, color);
-  tft.drawLine(x - 7, y - 7, x - 10, y - 10, color);
-  tft.drawLine(x + 7, y + 7, x + 10, y + 10, color);
-  tft.drawLine(x + 7, y - 7, x + 10, y - 10, color);
-  tft.drawLine(x - 7, y + 7, x - 10, y + 10, color);
-}
-
-void drawTargetIcon(int x, int y, uint16_t color) {
-  tft.drawCircle(x, y, 7, color);
-  tft.drawCircle(x, y, 4, color);
-  tft.fillCircle(x, y, 2, color);
-  // Crosshair
-  tft.drawLine(x - 10, y, x - 8, y, color);
-  tft.drawLine(x + 8, y, x + 10, y, color);
-  tft.drawLine(x, y - 10, x, y - 8, color);
-  tft.drawLine(x, y + 8, x, y + 10, color);
-}
-
-void showSplashScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(2);
-
-  int16_t x1, y1;
-  uint16_t w1, h1;
-  tft.getTextBounds("Smart", 0, 0, &x1, &y1, &w1, &h1);
-  int xPos1 = (160 - w1) / 2;
-  int yPos1 = (128 / 2) - h1 - 5;
-
-  tft.setCursor(xPos1, yPos1);
-  tft.setTextColor(ST77XX_CYAN);
-  tft.println("Smart");
-
-  tft.getTextBounds("Humidifier", 0, 0, &x1, &y1, &w1, &h1);
-  int xPos2 = (160 - w1) / 2;
-  int yPos2 = yPos1 + h1 + 5;
-
-  tft.setCursor(xPos2, yPos2);
-  tft.setTextColor(ST77XX_GREEN);
-  tft.println("Humidifier");
-
-  delay(1500);
+  lastActivityTime = millis();
 }
