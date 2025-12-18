@@ -39,7 +39,6 @@ void setup() {
   // Restore state from RTC memory
   if (rtcState.bootCount > 1) {
     currentMode = (Mode)rtcState.savedMode;
-    humidityThreshold = rtcState.savedHumidityThreshold;
     timedInterval = rtcState.savedTimedInterval;
     timedDuration = rtcState.savedTimedDuration;
     lastTimedStart = rtcState.lastTimedStartTime;
@@ -196,7 +195,6 @@ void prepareForDeepSleep(unsigned long sleepTimeMs) {
   // Save into RTC memory
   rtcState.wasSleeping = (displayState == DISPLAY_SLEEPING);
   rtcState.savedMode = currentMode;
-  rtcState.savedHumidityThreshold = humidityThreshold;
   rtcState.savedTimedInterval = timedInterval;
   rtcState.savedTimedDuration = timedDuration;
   rtcState.lastTimedStartTime = lastTimedStart;

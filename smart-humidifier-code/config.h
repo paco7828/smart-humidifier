@@ -16,7 +16,6 @@ RTC_DATA_ATTR struct {
   uint32_t bootCount = 0;
   bool wasSleeping = false;
   uint8_t savedMode = 0;
-  float savedHumidityThreshold = 50.0;
   uint32_t savedTimedInterval = 3600;
   uint32_t savedTimedDuration = 300;
   uint32_t lastSensorReadTime = 0;
